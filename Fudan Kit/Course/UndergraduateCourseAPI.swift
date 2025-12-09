@@ -19,6 +19,11 @@ public enum UndergraduateCourseAPI {
     public static func getSemesters() async throws -> ([Semester], Int) {
         let url = URL(string: "https://fdjwgl.fudan.edu.cn/student/for-std/course-table")!
         let data = try await Authenticator.neo.authenticate(url, loginURL: loginURL)
+
+        guard let htmlString = String(data: data, encoding: .utf8) else { throw LocatableError() }
+
+        let startDateMap = extractSemesterStartDates(from: htmlString)
+
         let elements = try decodeHTMLElementList(data, selector: "option[value]")
         
         let semesters: [Semester] = elements
@@ -36,7 +41,7 @@ public enum UndergraduateCourseAPI {
                 acc[pair.id] = acc[pair.id] ?? pair.text
             }
             .compactMap { id, text in
-                guard let yearStr = text.firstMatch(of: /(\d{4})-\d{4}/)?.1,
+                guard let yearStr = text.firstMatch(of: #/(\d{4})-\d{4}/#)?.1,
                       let year    = Int(yearStr)
                 else { return nil }
                 
@@ -50,13 +55,13 @@ public enum UndergraduateCourseAPI {
                 return Semester(year: year,
                                 type: type,
                                 semesterId: id,
-                                startDate: nil,
+                                startDate: startDateMap[id],
                                 weekCount: 18)
             }
             .sorted { ($0.year, $0.type.rawValue) > ($1.year, $1.type.rawValue) }
         
         guard let html = String(data: data, encoding: .utf8) else { throw LocatableError() }
-        let semesterIdPattern = /'id':\s*"?(?<semester>\d{3,})"?/
+        let semesterIdPattern = #/'id':\s*"?(?<semester>\d{3,})"?/#
         guard let semesterStr = html.firstMatch(of: semesterIdPattern)?.semester,
               let semesterId  = Int(semesterStr) else {
             throw LocatableError()
@@ -171,6 +176,75 @@ public enum UndergraduateCourseAPI {
 
         return Array(courseDict.values)
     }
+
+    /// Extract semester start dates from HTML page
+    /// - Parameter html: HTML string containing JavaScript with semester data
+    /// - Returns: Dictionary mapping semester ID to start date
+    private static func extractSemesterStartDates(from html: String) -> [Int: Date] {
+        let pattern = #/var\s+semesters\s*=\s*JSON\.parse\s*\(\s*'([\s\S]*?)'\s*\)/#
+
+        guard let match = html.firstMatch(of: pattern) else {
+            return [:]
+        }
+
+        let jsonString = String(match.1)
+
+        func parseJSONData(_ data: Data) -> [Int: Date] {
+            do {
+                let decoder = JSONDecoder()
+                let dateFormatter = DateFormatter()
+                dateFormatter.dateFormat = "yyyy-MM-dd"
+                dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+                dateFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+                decoder.dateDecodingStrategy = .formatted(dateFormatter)
+
+                let semesters = try decoder.decode([SemesterData].self, from: data)
+                var dateMap: [Int: Date] = [:]
+                for semester in semesters {
+                    if let id = semester.id, let startDate = semester.startDate {
+                        dateMap[id] = startDate
+                    }
+                }
+                return dateMap
+            } catch {
+                print("Error parsing semester JSON: \(error)")
+                return [:]
+            }
+        }
+
+        if let data = jsonString.data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: data)) != nil {
+            return parseJSONData(data)
+        }
+        var unescapedString = jsonString
+
+        unescapedString = unescapedString.replacingOccurrences(of: #"\\\""#, with: #"\""#)
+        unescapedString = unescapedString.replacingOccurrences(of: #"\\n"#, with: "\n")
+        unescapedString = unescapedString.replacingOccurrences(of: #"\\r"#, with: "\r")
+        unescapedString = unescapedString.replacingOccurrences(of: #"\\t"#, with: "\t")
+
+        unescapedString = unescapedString.replacingOccurrences(of: #"\""#, with: #"""#)
+        unescapedString = unescapedString.replacingOccurrences(of: #"\\"#, with: #"\"#)
+        unescapedString = unescapedString.replacingOccurrences(of: #"\/"#, with: #"/"#)
+
+        if let data = unescapedString.data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: data)) != nil {
+            return parseJSONData(data)
+        }
+
+        return [:]
+    }
+
+    private struct SemesterData: Decodable {
+        let id: Int?
+        let startDate: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case startDate
+        }
+    }
+
     // MARK: - Exam
     
     /// Get uset's exam list
@@ -452,8 +526,8 @@ public enum UndergraduateCourseAPI {
         let indexData = try await Authenticator.neo.authenticate(indexURL, loginURL: loginURL)
         
         guard let html = String(data: indexData, encoding: .utf8),
-              let gradeMatch = html.firstMatch(of: /name="grade"\s+value="(\d+)"/),
-              let deptMatch = html.firstMatch(of: /name="departmentAssoc"\s+value="(\d+)"/) else {
+              let gradeMatch = html.firstMatch(of: #/name="grade"\s+value="(\d+)"/#),
+              let deptMatch = html.firstMatch(of: #/name="departmentAssoc"\s+value="(\d+)"/#) else {
             throw LocatableError()
         }
         
