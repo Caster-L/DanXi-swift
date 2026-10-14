@@ -62,6 +62,7 @@ public class CourseModel: ObservableObject {
     }
     
     public func getConflictingCourses() -> [Course]? {
+        let courses = mergedCourses
         var codes = Set<String>(CourseSettings.shared.hiddenCourses)
         let conflicts = courses.filter { course in
             guard !codes.contains(course.code) else { return false }
@@ -83,6 +84,7 @@ public class CourseModel: ObservableObject {
     init(studentType: StudentType, courses: [Course], semester: Semester, semesters: [Semester], week: Int) {
         self.studentType = studentType
         self.courses = courses
+        self.mergedCourses = studentType == .undergrad ? UndergraduateCourseAPI.mergeCourses(courses) : courses
         self.semester = semester
         self.semesters = semesters
         self.week = week
@@ -91,6 +93,7 @@ public class CourseModel: ObservableObject {
     init(cache: CourseModelCache, week: Int) {
         self.studentType = cache.studentType
         self.courses = cache.courses
+        self.mergedCourses = cache.studentType == .undergrad ? UndergraduateCourseAPI.mergeCourses(cache.courses) : cache.courses
         self.semester = cache.semester
         self.semesters = cache.semesters
         self.week = week
@@ -99,7 +102,11 @@ public class CourseModel: ObservableObject {
     // MARK: - Source of Truth
     
     let studentType: StudentType
-    @Published public var courses: [Course]
+    @Published public var courses: [Course] {
+        didSet { mergedCourses = studentType == .undergrad ? UndergraduateCourseAPI.mergeCourses(courses) : courses }
+    }
+    // Derived for display and export; only the original courses are persisted.
+    private var mergedCourses: [Course]
     @Published public var semester: Semester
     @Published public var semesters: [Semester]
     @Published public var week: Int
@@ -137,7 +144,7 @@ public class CourseModel: ObservableObject {
     }
     
     public var coursesInThisWeek: [Course] {
-        courses.filter { course in
+        mergedCourses.filter { course in
             !CourseSettings.shared.hiddenCourses.contains(course.code) && course.onWeeks.contains(week)
         }
     }
@@ -240,7 +247,7 @@ public class CourseModel: ObservableObject {
     public var calendarMap: [CourseKey: [Course]] {
         var map: [CourseKey: [Course]] = [:]
         
-        for course in courses {
+        for course in mergedCourses {
             let key = CourseKey(code: course.code, name: course.name)
             map[key, default: []].append(course)
         }

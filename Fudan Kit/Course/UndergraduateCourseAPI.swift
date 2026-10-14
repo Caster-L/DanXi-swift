@@ -172,79 +172,69 @@ public enum UndergraduateCourseAPI {
         
         let courseBuilders = try JSONDecoder().decode([CourseBuilder].self, from: coursesData)
         
-        return mergeCourseBuilders(courseBuilders)
+        return courseBuilders.map { $0.build() }
     }
 
-    // Solve the scheduling for courses that change rooms or teachers weekly
-    /// When the same course is taught in multiple classrooms or by multiple teachers, the fdjwgl system's json file treats them as separate courses. Therefore, it's necessary to merge the classroom or teacher information; otherwise, this will result in overlapping courses on the calendar.
-    ///
-    /// Sketched out next is an example:
-    /// {"lessonId":720500,"lessonCode":"COMP130135.03","lessonName":"全校13","courseCode":"CS20012","courseName":"面向对象程序设计","weeksStr":"2~16(双)","weekIndexes":[16,2,4,6,8,10,12,14],"room":"H逸夫楼204","building":"H逸夫楼","campus":"邯郸校区","weekday":3,"startUnit":6,"endUnit":7,"lessonRemark":null,"teachers":["王雪平"],"courseType":{"nameZh":"专业教育课程","nameEn":"id:5","id":3,"code":"03","enabled":false,"createdDateTime":null,"updatedDateTime":null,"bizTypeAssocs":[2,3,4],"transient":false,"bizTypeIds":[4,2,3],"name":"专业教育课程"},"credits":2.0,"periodInfo":{"total":36.0,"weeks":18,"theory":36.0,"theoryUnit":null,"requireTheory":null,"practice":null,"practiceUnit":null,"requirePractice":null,"focusPractice":null,"focusPracticeUnit":null,"dispersedPractice":null,"test":null,"testUnit":null,"requireTest":null,"experiment":null,"experimentUnit":null,"requireExperiment":null,"machine":null,"machineUnit":null,"requireMachine":null,"design":null,"designUnit":null,"requireDesign":null,"periodsPerWeek":2.0,"extra":null,"extraUnit":null,"requireExtra":null},"stdCount":88,"limitCount":99,"startTime":"13:30","endTime":"15:10","groupNum":null,"semesterId":null,"activityType":null,"taskPeopleNum":null},{"lessonId":720500,"lessonCode":"COMP130135.03","lessonName":"全校13","courseCode":"CS20012","courseName":"面向对象程序设计","weeksStr":"2~16(双)","weekIndexes":[16,2,4,6,8,10,12,14],"room":"H逸夫楼205","building":"H逸夫楼","campus":"邯郸校区","weekday":3,"startUnit":6,"endUnit":7,"lessonRemark":null,"teachers":["王雪平"],"courseType":{"nameZh":"专业教育课程","nameEn":"id:5","id":3,"code":"03","enabled":false,"createdDateTime":null,"updatedDateTime":null,"bizTypeAssocs":[2,3,4],"transient":false,"bizTypeIds":[4,2,3],"name":"专业教育课程"},"credits":2.0,"periodInfo":{"total":36.0,"weeks":18,"theory":36.0,"theoryUnit":null,"requireTheory":null,"practice":null,"practiceUnit":null,"requirePractice":null,"focusPractice":null,"focusPracticeUnit":null,"dispersedPractice":null,"test":null,"testUnit":null,"requireTest":null,"experiment":null,"experimentUnit":null,"requireExperiment":null,"machine":null,"machineUnit":null,"requireMachine":null,"design":null,"designUnit":null,"requireDesign":null,"periodsPerWeek":2.0,"extra":null,"extraUnit":null,"requireExtra":null},"stdCount":88,"limitCount":99,"startTime":"13:30","endTime":"15:10","groupNum":null,"semesterId":null,"activityType":null,"taskPeopleNum":null},
-    ///
-    /// We want the final display to show one course with its room as 'H逸夫楼 204, H逸夫楼 205', rather than showing two separate courses in different classrooms.
-    
-    private static func mergeCourseBuilders(_ builders: [CourseBuilder]) -> [Course] {
-        var courseDict = [String: Course]()
-        
-        func mergeProperties(from old: String, and new: String) -> String {
-            let oldItems = Set(old.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
-            let newItems = Set(new.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
-                
-            return Array(oldItems.union(newItems))
-                .filter { !$0.isEmpty }
-                .sorted()
-                .joined(separator: ", ")
+    /// Merge simultaneous rooms and teachers without changing the source records.
+    static func mergeCourses(_ courses: [Course]) -> [Course] {
+        struct Slot: Hashable {
+            let code, name: String
+            let weekday, start, end: Int
         }
-        
-        var coursesToSplit = Set<String>()
-        
-        let courses = builders.map { $0.build() }
-        
-        for course in courses {
-            if courses.contains(where: { $0.id != course.id && $0.code == course.code && $0.conflicts(with: course) }) {
-                coursesToSplit.insert(course.code)
-            }
+        struct Details: Hashable {
+            let teacher, location: String
         }
-        
-        for builder in builders {
-            var courses : [Course] = []
-            if coursesToSplit.contains(builder.lessonCode) {
-                let template = builder.build()
-                courses = template.onWeeks.map{ week in
-                    Course(id: UUID(), name: template.name, code: template.code, teacher: template.teacher, location: template.location, weekday: template.weekday, start: template.start, end: template.end, onWeeks: [week])
-                }
+
+        func joined(_ values: [String]) -> String {
+            Set(values.flatMap { $0.split(separator: ",") }
+                .map { $0.trimmingCharacters(in: .whitespaces) })
+                .filter { !$0.isEmpty }.sorted().joined(separator: ", ")
+        }
+
+        let slots = Dictionary(grouping: courses) {
+            Slot(code: $0.code, name: $0.name, weekday: $0.weekday, start: $0.start, end: $0.end)
+        }
+        var result: [Course] = []
+        for (slot, records) in slots {
+            var weeksByDetails: [Details: [Int]] = [:]
+            // Resolve each week's actual rooms before regrouping the weeks.
+            for week in Set(records.flatMap(\.onWeeks)).sorted() {
+                let active = records.filter { $0.openOn(week) }
+                let details = Details(teacher: joined(active.map(\.teacher)),
+                                      location: joined(active.map(\.location)))
+                weeksByDetails[details, default: []].append(week)
             }
-            else{
-                courses = [builder.build()]
-            }
-            
-            for course in courses {
-                let weeksKey = course.onWeeks.sorted().map(String.init).joined(separator: "_")
-                let key = "\(course.code)-\(course.weekday)-\(course.start)-\(course.end)-\(weeksKey)"
-                
-                if let existed = courseDict[key] {
-                    let mergedRooms = mergeProperties(from: existed.location, and: course.location)
-                    let mergedTeachers = mergeProperties(from: existed.teacher, and: course.teacher)
-                    
-                    courseDict[key] = Course(
-                        id: existed.id,
-                        name: existed.name,
-                        code: existed.code,
-                        teacher: mergedTeachers,
-                        location: mergedRooms,
-                        weekday: existed.weekday,
-                        start: existed.start,
-                        end: existed.end,
-                        onWeeks: existed.onWeeks
-                    )
-                } else {
-                    courseDict[key] = course
+
+            for (details, weeks) in weeksByDetails {
+                // Keep weekly/fortnightly runs separate across room changes or gaps.
+                var index = 0
+                while index < weeks.count {
+                    var end = index + 1
+                    if end < weeks.count {
+                        let interval = weeks[end] - weeks[index]
+                        if interval == 1 || interval == 2 {
+                            end += 1
+                            while end < weeks.count && weeks[end] - weeks[end - 1] == interval {
+                                end += 1
+                            }
+                        }
+                    }
+                    result.append(Course(id: UUID(), name: slot.name, code: slot.code,
+                                         teacher: details.teacher, location: details.location,
+                                         weekday: slot.weekday, start: slot.start, end: slot.end,
+                                         onWeeks: Array(weeks[index..<end])))
+                    index = end
                 }
             }
         }
-
-        return Array(courseDict.values)
+        return result.sorted {
+            if $0.weekday != $1.weekday { return $0.weekday < $1.weekday }
+            if $0.start != $1.start { return $0.start < $1.start }
+            if $0.code != $1.code { return $0.code < $1.code }
+            return $0.onWeeks.lexicographicallyPrecedes($1.onWeeks)
+        }
     }
+
     // MARK: - Exam
     
     /// Get user's exam list
